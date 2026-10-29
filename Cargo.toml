@@ -1,0 +1,36 @@
+[package]
+name = "rrm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cedar-policy = "4.14.0"
+config = { version = "0.15", default-features = false, features = ["toml"] }
+prost = "0.14.4"
+prost-types = "0.14.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+surrealdb = { version = "3.2.4", default-features = false, features = [
+    "kv-mem",
+    "protocol-ws",
+    "protocol-http",
+    "rustls",
+] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "sync",
+] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
+
+[build-dependencies]
+protoc-bin-vendored = "3.3.0"
+tonic-prost-build = "0.14.6"
