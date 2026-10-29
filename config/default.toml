@@ -1,0 +1,13 @@
+[server]
+listen_addr = "0.0.0.0:50051"
+
+[auth]
+admin_token = "admin-secret-token"
+
+[surrealdb]
+endpoint = "memory"
+namespace = "rrm"
+database = "authz"
+# Optional credentials when connecting to a remote SurrealDB instance (ws:// or http://)
+# username = "root"
+# password = "root"

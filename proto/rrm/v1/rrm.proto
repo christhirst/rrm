@@ -1,0 +1,277 @@
+syntax = "proto3";
+
+package rrm.v1;
+
+// ============================================================================
+// Common Types
+// ============================================================================
+
+message EntityUidMsg {
+  string entity_type = 1;
+  string entity_id = 2;
+}
+
+message Space {
+  string space_id = 1;
+  string name = 2;
+  string description = 3;
+  string created_at = 4;
+}
+
+message PolicyRecord {
+  string space_id = 1;
+  string policy_id = 2;
+  string description = 3;
+  string cedar_text = 4;
+  string updated_at = 5;
+}
+
+message UserRecord {
+  string space_id = 1;
+  string user_id = 2;
+  string email = 3;
+  repeated string roles = 4;
+  repeated string groups = 5;
+  string attributes_json = 6;
+  string updated_at = 7;
+}
+
+message CedarEntityRecord {
+  string space_id = 1;
+  EntityUidMsg uid = 2;
+  repeated EntityUidMsg parents = 3;
+  string attributes_json = 4;
+  string updated_at = 5;
+}
+
+// ============================================================================
+// AdminService (RRM Platform Admin - requires `x-admin-token` metadata)
+// ============================================================================
+
+service AdminService {
+  rpc CreateSpace(CreateSpaceRequest) returns (CreateSpaceResponse);
+  rpc GetSpace(GetSpaceRequest) returns (GetSpaceResponse);
+  rpc ListSpaces(ListSpacesRequest) returns (ListSpacesResponse);
+  rpc DeleteSpace(DeleteSpaceRequest) returns (DeleteSpaceResponse);
+}
+
+message CreateSpaceRequest {
+  string space_id = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message CreateSpaceResponse {
+  Space space = 1;
+  string api_token = 2;
+}
+
+message GetSpaceRequest {
+  string space_id = 1;
+}
+
+message GetSpaceResponse {
+  Space space = 1;
+}
+
+message ListSpacesRequest {}
+
+message ListSpacesResponse {
+  repeated Space spaces = 1;
+}
+
+message DeleteSpaceRequest {
+  string space_id = 1;
+}
+
+message DeleteSpaceResponse {
+  bool deleted = 1;
+}
+
+// ============================================================================
+// PolicyService (App Admin - requires `x-space-token` metadata for space_id)
+// ============================================================================
+
+service PolicyService {
+  rpc UpsertPolicy(UpsertPolicyRequest) returns (UpsertPolicyResponse);
+  rpc UploadPolicySet(UploadPolicySetRequest) returns (UploadPolicySetResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+}
+
+message PolicyInput {
+  string policy_id = 1;
+  string description = 2;
+  string cedar_text = 3;
+}
+
+message UpsertPolicyRequest {
+  string space_id = 1;
+  string policy_id = 2;
+  string description = 3;
+  string cedar_text = 4;
+}
+
+message UpsertPolicyResponse {
+  PolicyRecord policy = 1;
+}
+
+message UploadPolicySetRequest {
+  string space_id = 1;
+  repeated PolicyInput policies = 2;
+  bool replace_existing = 3;
+}
+
+message UploadPolicySetResponse {
+  repeated PolicyRecord policies = 1;
+}
+
+message GetPolicyRequest {
+  string space_id = 1;
+  string policy_id = 2;
+}
+
+message GetPolicyResponse {
+  PolicyRecord policy = 1;
+}
+
+message ListPoliciesRequest {
+  string space_id = 1;
+}
+
+message ListPoliciesResponse {
+  repeated PolicyRecord policies = 1;
+}
+
+message DeletePolicyRequest {
+  string space_id = 1;
+  string policy_id = 2;
+}
+
+message DeletePolicyResponse {
+  bool deleted = 1;
+}
+
+// ============================================================================
+// EntityService (App Admin / App - SurrealDB User & Cedar Entity Store)
+// ============================================================================
+
+service EntityService {
+  rpc UpsertUser(UpsertUserRequest) returns (UpsertUserResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+  rpc UpsertEntity(UpsertEntityRequest) returns (UpsertEntityResponse);
+  rpc GetEntity(GetEntityRequest) returns (GetEntityResponse);
+  rpc ListEntities(ListEntitiesRequest) returns (ListEntitiesResponse);
+  rpc DeleteEntity(DeleteEntityRequest) returns (DeleteEntityResponse);
+}
+
+message UpsertUserRequest {
+  string space_id = 1;
+  string user_id = 2;
+  string email = 3;
+  repeated string roles = 4;
+  repeated string groups = 5;
+  string attributes_json = 6;
+}
+
+message UpsertUserResponse {
+  UserRecord user = 1;
+}
+
+message GetUserRequest {
+  string space_id = 1;
+  string user_id = 2;
+}
+
+message GetUserResponse {
+  UserRecord user = 1;
+}
+
+message ListUsersRequest {
+  string space_id = 1;
+}
+
+message ListUsersResponse {
+  repeated UserRecord users = 1;
+}
+
+message DeleteUserRequest {
+  string space_id = 1;
+  string user_id = 2;
+}
+
+message DeleteUserResponse {
+  bool deleted = 1;
+}
+
+message UpsertEntityRequest {
+  string space_id = 1;
+  EntityUidMsg uid = 2;
+  repeated EntityUidMsg parents = 3;
+  string attributes_json = 4;
+}
+
+message UpsertEntityResponse {
+  CedarEntityRecord entity = 1;
+}
+
+message GetEntityRequest {
+  string space_id = 1;
+  EntityUidMsg uid = 2;
+}
+
+message GetEntityResponse {
+  CedarEntityRecord entity = 1;
+}
+
+message ListEntitiesRequest {
+  string space_id = 1;
+  string entity_type = 2;
+}
+
+message ListEntitiesResponse {
+  repeated CedarEntityRecord entities = 1;
+}
+
+message DeleteEntityRequest {
+  string space_id = 1;
+  EntityUidMsg uid = 2;
+}
+
+message DeleteEntityResponse {
+  bool deleted = 1;
+}
+
+// ============================================================================
+// AuthorizationService (App - Evaluates requests against Space Cedar Policies)
+// ============================================================================
+
+service AuthorizationService {
+  rpc Authorize(AuthorizeRequest) returns (AuthorizeResponse);
+}
+
+enum AuthDecision {
+  AUTH_DECISION_UNSPECIFIED = 0;
+  AUTH_DECISION_ALLOW = 1;
+  AUTH_DECISION_DENY = 2;
+}
+
+message AuthorizeRequest {
+  string space_id = 1;
+  EntityUidMsg principal = 2;
+  EntityUidMsg action = 3;
+  EntityUidMsg resource = 4;
+  string context_json = 5;
+  repeated CedarEntityRecord additional_entities = 6;
+}
+
+message AuthorizeResponse {
+  bool allowed = 1;
+  AuthDecision decision = 2;
+  repeated string determining_policies = 3;
+  repeated string errors = 4;
+}
