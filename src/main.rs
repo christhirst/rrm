@@ -13,6 +13,33 @@ use rrm::pb::{
 };
 use rrm::store::Store;
 
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    info!("Shutdown signal received, stopping gRPC server");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -41,10 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(PolicyServiceServer::new(service.clone()))
         .add_service(EntityServiceServer::new(service.clone()))
         .add_service(AuthorizationServiceServer::new(service))
-        .serve_with_shutdown(addr, async {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("Shutdown signal received, stopping gRPC server");
-        })
+        .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
     Ok(())

@@ -6,7 +6,7 @@ FROM rust:1-bookworm AS builder
 WORKDIR /usr/src/rrm
 
 # Copy manifests and build script first to cache dependency layer
-COPY Cargo.toml build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto ./proto
 COPY src ./src
 
@@ -14,23 +14,23 @@ COPY src ./src
 RUN cargo build --release --locked || cargo build --release
 
 # ============================================================================
-# Stage 2: Runtime
+# Stage 2: Runtime (Distroless)
 # ============================================================================
-FROM debian:bookworm-slim AS runtime
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
 WORKDIR /app
 
-# Copy compiled binary and configuration directory
-COPY --from=builder /usr/src/rrm/target/release/rrm /app/rrm
-COPY config /app/config
-COPY proto /app/proto
+# Copy compiled binary, config, and proto with nonroot ownership
+COPY --chown=nonroot:nonroot --from=builder /usr/src/rrm/target/release/rrm /app/rrm
+COPY --chown=nonroot:nonroot config /app/config
+COPY --chown=nonroot:nonroot proto /app/proto
+
+USER nonroot:nonroot
 
 EXPOSE 50051
+STOPSIGNAL SIGTERM
 
 ENV RRM_SERVER__LISTEN_ADDR="0.0.0.0:50051"
 
 ENTRYPOINT ["/app/rrm"]
+

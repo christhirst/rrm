@@ -84,6 +84,8 @@ cargo run --release
 ```
 
 #### Option B: Build and Run with Docker
+The container uses Google Distroless (`gcr.io/distroless/cc-debian12:nonroot`) for minimal attack surface, containing only the runtime dependencies and running as the unprivileged user `nonroot` (UID `65532`).
+
 ```bash
 # Build the container image
 docker build -t rrm:latest .
@@ -93,6 +95,16 @@ docker run --rm -p 50051:50051 \
   -e RRM_AUTH__ADMIN_TOKEN="prod-admin-secret" \
   rrm:latest
 ```
+
+#### Option C: Automated Docker Hub Publishing (GitHub Actions)
+A GitHub Actions workflow is provided at [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) that automatically builds the distroless image and pushes it to Docker Hub on branch pushes, tags, and workflow dispatches.
+
+To enable pushing to your Docker Hub repository:
+1. Navigate to your GitHub repository: **Settings** -> **Secrets and variables** -> **Actions**.
+2. Add the following repository secrets:
+   - `DOCKERHUB_USERNAME`: Your Docker Hub account or organization name.
+   - `DOCKERHUB_TOKEN`: A Docker Hub Personal Access Token (PAT) with Read & Write access.
+
 
 ---
 
