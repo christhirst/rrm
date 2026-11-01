@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package authzen.authorization.v1;
+
+import "google/protobuf/struct.proto";
+
+// ============================================================================
+// AuthZEN Authorization API 1.0 (OpenID Foundation)
+// ============================================================================
+
+service AuthorizationService {
+  // Evaluates a single access request (Subject-Action-Resource-Context)
+  rpc AccessEvaluation(EvaluationRequest) returns (EvaluationResponse);
+
+  // Evaluates a batch of access requests in a single round-trip
+  rpc AccessEvaluationBatch(AccessEvaluationBatchRequest) returns (AccessEvaluationBatchResponse);
+}
+
+message Subject {
+  string type = 1;
+  string id = 2;
+  google.protobuf.Struct properties = 3;
+}
+
+message Action {
+  string name = 1;
+  google.protobuf.Struct properties = 2;
+}
+
+message Resource {
+  string type = 1;
+  string id = 2;
+  google.protobuf.Struct properties = 3;
+}
+
+message EvaluationRequest {
+  string space_id = 1;
+  Subject subject = 2;
+  Action action = 3;
+  Resource resource = 4;
+  google.protobuf.Struct context = 5;
+}
+
+message EvaluationResponse {
+  bool decision = 1;
+  google.protobuf.Struct context = 2;
+}
+
+message EvaluationItem {
+  string id = 1;
+  Subject subject = 2;
+  Action action = 3;
+  Resource resource = 4;
+  google.protobuf.Struct context = 5;
+}
+
+message AccessEvaluationBatchRequest {
+  string space_id = 1;
+  Subject subject = 2;
+  Action action = 3;
+  Resource resource = 4;
+  google.protobuf.Struct context = 5;
+  repeated EvaluationItem evaluations = 6;
+}
+
+message EvaluationItemResponse {
+  string id = 1;
+  bool decision = 2;
+  google.protobuf.Struct context = 3;
+}
+
+message AccessEvaluationBatchResponse {
+  repeated EvaluationItemResponse evaluations = 1;
+}

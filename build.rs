@@ -6,10 +6,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("cargo:rerun-if-changed=proto/rrm/v1/rrm.proto");
+    println!("cargo:rerun-if-changed=proto/authzen/v1/authzen.proto");
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&["proto/rrm/v1/rrm.proto"], &["proto"])?;
+        .compile_protos(
+            &[
+                "proto/rrm/v1/rrm.proto",
+                "proto/authzen/v1/authzen.proto",
+            ],
+            &["proto"],
+        )?;
 
     Ok(())
 }

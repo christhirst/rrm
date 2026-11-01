@@ -1,8 +1,19 @@
 [server]
 listen_addr = "0.0.0.0:50051"
+http_listen_addr = "0.0.0.0:8080"
 
 [auth]
 admin_token = "admin-secret-token"
+
+# Optional OAuth 2.0 / OIDC Identity Provider (IdP) integration
+# Disabled by default so rrm can be tested and operated without an external IdP
+[auth.oauth]
+enabled = false
+issuer = ""
+jwks_url = ""
+audience = ""
+space_claim = "space_id"
+
 
 [surrealdb]
 endpoint = "memory"

@@ -15,11 +15,40 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub listen_addr: String,
+    #[serde(default = "default_http_listen_addr")]
+    pub http_listen_addr: String,
+}
+
+fn default_http_listen_addr() -> String {
+    "0.0.0.0:8080".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
     pub admin_token: String,
+    #[serde(default)]
+    pub oauth: OAuthConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct OAuthConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub jwks_url: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
+    #[serde(default = "default_space_claim")]
+    pub space_claim: String,
+    /// Optional PEM public key or secret string for offline / self-contained JWT validation
+    #[serde(default)]
+    pub secret_or_public_key: Option<String>,
+}
+
+fn default_space_claim() -> String {
+    "space_id".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -36,9 +65,11 @@ impl Default for AppConfig {
         Self {
             server: ServerConfig {
                 listen_addr: "0.0.0.0:50051".to_string(),
+                http_listen_addr: "0.0.0.0:8080".to_string(),
             },
             auth: AuthConfig {
                 admin_token: "admin-secret-token".to_string(),
+                oauth: OAuthConfig::default(),
             },
             surrealdb: SurrealDbConfig {
                 endpoint: "memory".to_string(),
@@ -65,7 +96,9 @@ impl AppConfig {
 
         let mut builder = Config::builder()
             .set_default("server.listen_addr", "0.0.0.0:50051")?
+            .set_default("server.http_listen_addr", "0.0.0.0:8080")?
             .set_default("auth.admin_token", "admin-secret-token")?
+            .set_default("auth.oauth.enabled", false)?
             .set_default("surrealdb.endpoint", "memory")?
             .set_default("surrealdb.namespace", "rrm")?
             .set_default("surrealdb.database", "authz")?
@@ -95,6 +128,8 @@ mod tests {
     fn load_default_config_from_config_folder_should_succeed() {
         let cfg = AppConfig::load().expect("should load default.toml");
         assert_eq!(cfg.server.listen_addr, "0.0.0.0:50051");
+        assert_eq!(cfg.server.http_listen_addr, "0.0.0.0:8080");
+        assert!(!cfg.auth.oauth.enabled);
         assert_eq!(cfg.surrealdb.endpoint, "memory");
         assert_eq!(cfg.surrealdb.namespace, "rrm");
         assert_eq!(cfg.surrealdb.database, "authz");

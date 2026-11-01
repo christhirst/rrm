@@ -23,6 +23,9 @@ pub enum AppError {
 
     #[error("Database error: {0}")]
     Database(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 impl From<surrealdb::Error> for AppError {
@@ -41,7 +44,7 @@ impl From<AppError> for Status {
             }
             AppError::Unauthenticated(msg) => Self::unauthenticated(msg),
             AppError::PermissionDenied(msg) => Self::permission_denied(msg),
-            AppError::Database(msg) => Self::internal(msg),
+            AppError::Database(msg) | AppError::Internal(msg) => Self::internal(msg),
         }
     }
 }

@@ -27,10 +27,11 @@ COPY --chown=nonroot:nonroot proto /app/proto
 
 USER nonroot:nonroot
 
-EXPOSE 50051
+EXPOSE 50051 8080
 STOPSIGNAL SIGTERM
 
 ENV RRM_SERVER__LISTEN_ADDR="0.0.0.0:50051"
+ENV RRM_SERVER__HTTP_LISTEN_ADDR="0.0.0.0:8080"
 
 ENTRYPOINT ["/app/rrm"]
 

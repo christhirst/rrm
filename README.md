@@ -90,8 +90,8 @@ The container uses Google Distroless (`gcr.io/distroless/cc-debian12:nonroot`) f
 # Build the container image
 docker build -t rrm:latest .
 
-# Run container with default in-memory SurrealDB
-docker run --rm -p 50051:50051 \
+# Run container with default in-memory SurrealDB (exposing gRPC :50051 and AuthZEN HTTP :8080)
+docker run --rm -p 50051:50051 -p 8080:8080 \
   -e RRM_AUTH__ADMIN_TOKEN="prod-admin-secret" \
   rrm:latest
 ```
@@ -336,6 +336,220 @@ Example response (`ALLOW`):
 ```
 
 You can also pass transient `additional_entities` directly in `AuthorizeRequest` for resources that are not persisted in SurrealDB.
+
+---
+
+## 4. OpenID AuthZEN Standard Compliance (HTTP/REST & gRPC)
+
+`rrm` fully implements the **[OpenID Foundation AuthZEN Authorization API 1.0](https://openid.net/specs/authorization-api-1_0.html)** standard. Any AuthZEN-compatible Policy Enforcement Point (PEP), API Gateway (e.g., Envoy, Kong, Traefik, Tyk), or language SDK can communicate directly with `rrm`'s Policy Decision Point (PDP).
+
+### Endpoints Overview
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/.well-known/authzen-configuration` | OpenID RFC 8615 metadata discovery document |
+| `GET` | `/spaces/{space_id}/.well-known/authzen-configuration` | Tenant-scoped metadata discovery |
+| `POST` | `/access/v1/evaluation` | Evaluates a single Subject-Action-Resource-Context (SARC) request |
+| `POST` | `/spaces/{space_id}/access/v1/evaluation` | Explicit space-scoped single evaluation |
+| `POST` | `/access/v1/evaluations` | Batch evaluates multiple access requests in a single round-trip |
+| `POST` | `/spaces/{space_id}/access/v1/evaluations` | Explicit space-scoped batch evaluations |
+| `gRPC` | `authzen.authorization.v1.AuthorizationService` | Canonical AuthZEN Protocol Buffers / gRPC service |
+
+---
+
+### Authentication Modes
+
+#### Mode A: Frictionless Testing & Local Development (Zero IdP Dependency)
+By default, **no external Identity Provider (IdP) is required** (`auth.oauth.enabled = false`). You can test and operate `rrm` completely offline using your space's API token (`rrm_sp_<space_id>_...`) generated via `CreateSpace`:
+
+```bash
+# Pass token via standard Authorization header
+-H "Authorization: Bearer rrm_sp_orders-app_..."
+```
+`rrm` automatically resolves the associated space from the token.
+
+#### Mode B: Optional OAuth 2.0 / OIDC Identity Provider (IdP)
+When integrating with an IdP (such as Keycloak, Okta, Auth0, or Entra ID), enable OAuth in `config/default.toml` or via environment variables:
+
+```toml
+[auth.oauth]
+enabled = true
+issuer = "https://idp.example.com/realms/master"
+jwks_url = "https://idp.example.com/realms/master/protocol/openid-connect/certs"
+audience = "my-application"
+space_claim = "space_id" # JWT claim indicating the target space
+# secret_or_public_key = "-----BEGIN PUBLIC KEY...-----" # optional static key for testing
+```
+When enabled, `rrm` validates incoming JWT tokens against the IdP's JWKS. Native space API tokens still work as a fallback so testing remains frictionless.
+
+---
+
+### HTTP / curl Examples
+
+#### 1. Discovery Metadata (`/.well-known/authzen-configuration`)
+```bash
+curl -s http://localhost:8080/.well-known/authzen-configuration | jq .
+```
+Response:
+```json
+{
+  "policy_decision_point": "http://localhost:8080",
+  "access_evaluation_endpoint": "http://localhost:8080/access/v1/evaluation",
+  "access_evaluations_endpoint": "http://localhost:8080/access/v1/evaluations"
+}
+```
+
+#### 2. Single Access Evaluation (`POST /access/v1/evaluation`)
+Evaluates whether a subject is permitted to execute an action on a resource.
+> **Note**: Per the AuthZEN specification, access authorization denials return an HTTP `200 OK` with `"decision": false`.
+
+```bash
+curl -X POST http://localhost:8080/access/v1/evaluation \
+  -H "Authorization: Bearer <YOUR_SPACE_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject": {
+      "type": "User",
+      "id": "alice",
+      "properties": {
+        "department": "finance",
+        "role": "manager"
+      }
+    },
+    "action": {
+      "name": "read"
+    },
+    "resource": {
+      "type": "Document",
+      "id": "financial-report-2026",
+      "properties": {
+        "classification": "confidential",
+        "department": "finance"
+      }
+    },
+    "context": {
+      "ip_address": "10.0.0.1",
+      "network": "internal"
+    }
+  }' | jq .
+```
+
+Permitted Response (`200 OK`):
+```json
+{
+  "decision": true,
+  "context": {
+    "reason": "Permitted by policies: [\"finance-managers-read\"]",
+    "determining_policies": ["finance-managers-read"],
+    "errors": []
+  }
+}
+```
+
+Denied Response (`200 OK`):
+```json
+{
+  "decision": false,
+  "context": {
+    "reason": "Access denied by policy or default deny",
+    "determining_policies": [],
+    "errors": []
+  }
+}
+```
+
+#### 3. Batch Access Evaluations (`POST /access/v1/evaluations`)
+Evaluate multiple authorization decisions in a single round-trip. Common attributes at the root are automatically inherited by individual evaluation items:
+
+```bash
+curl -X POST http://localhost:8080/access/v1/evaluations \
+  -H "Authorization: Bearer <YOUR_SPACE_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject": {
+      "type": "User",
+      "id": "alice"
+    },
+    "context": {
+      "network": "internal"
+    },
+    "evaluations": [
+      {
+        "id": "eval-doc-1",
+        "action": { "name": "read" },
+        "resource": {
+          "type": "Document",
+          "id": "doc-public",
+          "properties": { "classification": "public" }
+        }
+      },
+      {
+        "id": "eval-doc-2",
+        "action": { "name": "read" },
+        "resource": {
+          "type": "Document",
+          "id": "doc-secret",
+          "properties": { "classification": "top-secret" }
+        }
+      },
+      {
+        "id": "eval-doc-3",
+        "action": { "name": "delete" },
+        "resource": { "type": "Document", "id": "doc-public" }
+      }
+    ]
+  }' | jq .
+```
+
+Response (`200 OK`):
+```json
+{
+  "evaluations": [
+    {
+      "id": "eval-doc-1",
+      "decision": true,
+      "context": {
+        "reason": "Permitted by policies: [\"permit-public-docs\"]",
+        "determining_policies": ["permit-public-docs"],
+        "errors": []
+      }
+    },
+    {
+      "id": "eval-doc-2",
+      "decision": false,
+      "context": {
+        "reason": "Access denied by policy or default deny"
+      }
+    },
+    {
+      "id": "eval-doc-3",
+      "decision": false,
+      "context": {
+        "reason": "Access denied by policy or default deny"
+      }
+    }
+  ]
+}
+```
+
+---
+
+### AuthZEN gRPC Service
+
+You can also evaluate AuthZEN authorization requests over high-performance gRPC via `proto/authzen/v1/authzen.proto`:
+
+```bash
+grpcurl -plaintext \
+  -import-path proto -proto authzen/v1/authzen.proto \
+  -H "authorization: Bearer <YOUR_SPACE_API_TOKEN>" \
+  -d '{
+    "space_id": "orders-app",
+    "subject": {"type": "User", "id": "alice"},
+    "action": {"name": "read"},
+    "resource": {"type": "Document", "id": "doc-public"}
+  }' \
+  localhost:50051 authzen.authorization.v1.AuthorizationService/AccessEvaluation
+```
 
 ---
 
