@@ -13,6 +13,7 @@ prost-types = "0.14.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+subtle = "2.6"
 surrealdb = { version = "3.2.4", default-features = false, features = [
     "kv-mem",
     "protocol-ws",
@@ -37,3 +38,18 @@ uuid = { version = "1.23", features = ["v4", "serde"] }
 [build-dependencies]
 protoc-bin-vendored = "3.3.0"
 tonic-prost-build = "0.14.6"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that add noise without improving this codebase.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+too_many_lines = "allow"
+doc_markdown = "allow"

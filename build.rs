@@ -11,10 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .compile_protos(
-            &[
-                "proto/rrm/v1/rrm.proto",
-                "proto/authzen/v1/authzen.proto",
-            ],
+            &["proto/rrm/v1/rrm.proto", "proto/authzen/v1/authzen.proto"],
             &["proto"],
         )?;
 

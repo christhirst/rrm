@@ -26,6 +26,100 @@ use crate::pb::{
 };
 use crate::store::Store;
 
+trait HasSpaceId {
+    fn space_id(&self) -> &str;
+}
+
+macro_rules! impl_has_space_id {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl HasSpaceId for $t {
+                fn space_id(&self) -> &str {
+                    &self.space_id
+                }
+            }
+        )*
+    };
+}
+
+impl_has_space_id!(
+    UpsertPolicyRequest,
+    UploadPolicySetRequest,
+    GetPolicyRequest,
+    ListPoliciesRequest,
+    DeletePolicyRequest,
+    UpsertUserRequest,
+    GetUserRequest,
+    ListUsersRequest,
+    DeleteUserRequest,
+    UpsertEntityRequest,
+    GetEntityRequest,
+    ListEntitiesRequest,
+    DeleteEntityRequest,
+    AuthorizeRequest,
+);
+
+impl From<SpaceRecord> for Space {
+    fn from(record: SpaceRecord) -> Self {
+        Self {
+            space_id: record.space_id,
+            name: record.name,
+            description: record.description,
+            created_at: record.created_at,
+        }
+    }
+}
+
+impl From<StoredPolicy> for PolicyRecord {
+    fn from(record: StoredPolicy) -> Self {
+        Self {
+            space_id: record.space_id,
+            policy_id: record.policy_id,
+            description: record.description,
+            cedar_text: record.cedar_text,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+impl From<StoredUser> for UserRecord {
+    fn from(record: StoredUser) -> Self {
+        Self {
+            space_id: record.space_id,
+            user_id: record.user_id,
+            email: record.email,
+            roles: record.roles,
+            groups: record.groups,
+            attributes_json: record.attributes_json,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+impl From<EntityRef> for EntityUidMsg {
+    fn from(r: EntityRef) -> Self {
+        Self {
+            entity_type: r.entity_type,
+            entity_id: r.entity_id,
+        }
+    }
+}
+
+impl From<StoredEntity> for CedarEntityRecord {
+    fn from(record: StoredEntity) -> Self {
+        Self {
+            space_id: record.space_id,
+            uid: Some(EntityUidMsg {
+                entity_type: record.entity_type,
+                entity_id: record.entity_id,
+            }),
+            parents: record.parents.into_iter().map(Into::into).collect(),
+            attributes_json: record.attributes_json,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RrmService {
     store: Store,
@@ -40,60 +134,20 @@ impl RrmService {
         }
     }
 
-    fn to_proto_space(record: SpaceRecord) -> Space {
-        Space {
-            space_id: record.space_id,
-            name: record.name,
-            description: record.description,
-            created_at: record.created_at,
-        }
+    fn admin_request<T>(&self, req: Request<T>) -> Result<T, Status> {
+        let (meta, _, msg) = req.into_parts();
+        verify_admin(&meta, &self.admin_token)?;
+        Ok(msg)
     }
 
-    fn to_proto_policy(record: StoredPolicy) -> PolicyRecord {
-        PolicyRecord {
-            space_id: record.space_id,
-            policy_id: record.policy_id,
-            description: record.description,
-            cedar_text: record.cedar_text,
-            updated_at: record.updated_at,
-        }
-    }
-
-    fn to_proto_user(record: StoredUser) -> UserRecord {
-        UserRecord {
-            space_id: record.space_id,
-            user_id: record.user_id,
-            email: record.email,
-            roles: record.roles,
-            groups: record.groups,
-            attributes_json: record.attributes_json,
-            updated_at: record.updated_at,
-        }
-    }
-
-    fn to_proto_entity(record: StoredEntity) -> CedarEntityRecord {
-        CedarEntityRecord {
-            space_id: record.space_id,
-            uid: Some(EntityUidMsg {
-                entity_type: record.entity_type,
-                entity_id: record.entity_id,
-            }),
-            parents: record
-                .parents
-                .into_iter()
-                .map(|p| EntityUidMsg {
-                    entity_type: p.entity_type,
-                    entity_id: p.entity_id,
-                })
-                .collect(),
-            attributes_json: record.attributes_json,
-            updated_at: record.updated_at,
-        }
+    async fn space_request<T: HasSpaceId>(&self, req: Request<T>) -> Result<T, Status> {
+        let (meta, _, msg) = req.into_parts();
+        verify_space_access(&meta, &self.store, &self.admin_token, msg.space_id()).await?;
+        Ok(msg)
     }
 
     fn extract_uid_msg(uid: Option<EntityUidMsg>, field_name: &str) -> Result<EntityRef, AppError> {
-        let uid = uid
-            .ok_or_else(|| AppError::InvalidArgument(format!("Missing '{field_name}' field")))?;
+        let uid = uid.ok_or_else(|| AppError::invalid(format!("Missing '{field_name}' field")))?;
         // Validate against Cedar's EntityUid rules
         let _ = parse_entity_uid(&uid.entity_type, &uid.entity_id)?;
         Ok(EntityRef {
@@ -109,8 +163,7 @@ impl AdminService for RrmService {
         &self,
         request: Request<CreateSpaceRequest>,
     ) -> Result<Response<CreateSpaceResponse>, Status> {
-        verify_admin(request.metadata(), &self.admin_token)?;
-        let req = request.into_inner();
+        let req = self.admin_request(request)?;
         let created = self
             .store
             .create_space(&req.space_id, &req.name, &req.description)
@@ -118,7 +171,7 @@ impl AdminService for RrmService {
         let api_token = created.api_token.clone();
 
         Ok(Response::new(CreateSpaceResponse {
-            space: Some(Self::to_proto_space(created)),
+            space: Some(created.into()),
             api_token,
         }))
     }
@@ -127,11 +180,10 @@ impl AdminService for RrmService {
         &self,
         request: Request<GetSpaceRequest>,
     ) -> Result<Response<GetSpaceResponse>, Status> {
-        verify_admin(request.metadata(), &self.admin_token)?;
-        let req = request.into_inner();
+        let req = self.admin_request(request)?;
         let space = self.store.get_space(&req.space_id).await?;
         Ok(Response::new(GetSpaceResponse {
-            space: Some(Self::to_proto_space(space)),
+            space: Some(space.into()),
         }))
     }
 
@@ -139,10 +191,10 @@ impl AdminService for RrmService {
         &self,
         request: Request<ListSpacesRequest>,
     ) -> Result<Response<ListSpacesResponse>, Status> {
-        verify_admin(request.metadata(), &self.admin_token)?;
+        self.admin_request(request)?;
         let spaces = self.store.list_spaces().await?;
         Ok(Response::new(ListSpacesResponse {
-            spaces: spaces.into_iter().map(Self::to_proto_space).collect(),
+            spaces: spaces.into_iter().map(Into::into).collect(),
         }))
     }
 
@@ -150,8 +202,7 @@ impl AdminService for RrmService {
         &self,
         request: Request<DeleteSpaceRequest>,
     ) -> Result<Response<DeleteSpaceResponse>, Status> {
-        verify_admin(request.metadata(), &self.admin_token)?;
-        let req = request.into_inner();
+        let req = self.admin_request(request)?;
         let deleted = self.store.delete_space(&req.space_id).await?;
         Ok(Response::new(DeleteSpaceResponse { deleted }))
     }
@@ -163,9 +214,7 @@ impl PolicyService for RrmService {
         &self,
         request: Request<UpsertPolicyRequest>,
     ) -> Result<Response<UpsertPolicyResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
+        let req = self.space_request(request).await?;
 
         // Validate Cedar policy syntax before saving
         let _ = validate_and_parse_policy(&req.policy_id, &req.cedar_text)?;
@@ -181,7 +230,7 @@ impl PolicyService for RrmService {
             .await?;
 
         Ok(Response::new(UpsertPolicyResponse {
-            policy: Some(Self::to_proto_policy(saved)),
+            policy: Some(saved.into()),
         }))
     }
 
@@ -189,9 +238,7 @@ impl PolicyService for RrmService {
         &self,
         request: Request<UploadPolicySetRequest>,
     ) -> Result<Response<UploadPolicySetResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
+        let req = self.space_request(request).await?;
 
         // Validate all policies first before modifying the store
         for item in &req.policies {
@@ -213,7 +260,7 @@ impl PolicyService for RrmService {
                     &item.cedar_text,
                 )
                 .await?;
-            out.push(Self::to_proto_policy(saved));
+            out.push(saved.into());
         }
 
         Ok(Response::new(UploadPolicySetResponse { policies: out }))
@@ -223,13 +270,10 @@ impl PolicyService for RrmService {
         &self,
         request: Request<GetPolicyRequest>,
     ) -> Result<Response<GetPolicyResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let policy = self.store.get_policy(&req.space_id, &req.policy_id).await?;
         Ok(Response::new(GetPolicyResponse {
-            policy: Some(Self::to_proto_policy(policy)),
+            policy: Some(policy.into()),
         }))
     }
 
@@ -237,13 +281,10 @@ impl PolicyService for RrmService {
         &self,
         request: Request<ListPoliciesRequest>,
     ) -> Result<Response<ListPoliciesResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let policies = self.store.list_policies(&req.space_id).await?;
         Ok(Response::new(ListPoliciesResponse {
-            policies: policies.into_iter().map(Self::to_proto_policy).collect(),
+            policies: policies.into_iter().map(Into::into).collect(),
         }))
     }
 
@@ -251,10 +292,7 @@ impl PolicyService for RrmService {
         &self,
         request: Request<DeletePolicyRequest>,
     ) -> Result<Response<DeletePolicyResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let deleted = self
             .store
             .delete_policy(&req.space_id, &req.policy_id)
@@ -269,9 +307,7 @@ impl EntityService for RrmService {
         &self,
         request: Request<UpsertUserRequest>,
     ) -> Result<Response<UpsertUserResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
+        let req = self.space_request(request).await?;
 
         // Validate user_id and attributes JSON for Cedar compatibility
         let _ = parse_entity_uid("User", &req.user_id)?;
@@ -296,7 +332,7 @@ impl EntityService for RrmService {
             .await?;
 
         Ok(Response::new(UpsertUserResponse {
-            user: Some(Self::to_proto_user(user)),
+            user: Some(user.into()),
         }))
     }
 
@@ -304,13 +340,10 @@ impl EntityService for RrmService {
         &self,
         request: Request<GetUserRequest>,
     ) -> Result<Response<GetUserResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let user = self.store.get_user(&req.space_id, &req.user_id).await?;
         Ok(Response::new(GetUserResponse {
-            user: Some(Self::to_proto_user(user)),
+            user: Some(user.into()),
         }))
     }
 
@@ -318,13 +351,10 @@ impl EntityService for RrmService {
         &self,
         request: Request<ListUsersRequest>,
     ) -> Result<Response<ListUsersResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let users = self.store.list_users(&req.space_id).await?;
         Ok(Response::new(ListUsersResponse {
-            users: users.into_iter().map(Self::to_proto_user).collect(),
+            users: users.into_iter().map(Into::into).collect(),
         }))
     }
 
@@ -332,10 +362,7 @@ impl EntityService for RrmService {
         &self,
         request: Request<DeleteUserRequest>,
     ) -> Result<Response<DeleteUserResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let deleted = self.store.delete_user(&req.space_id, &req.user_id).await?;
         Ok(Response::new(DeleteUserResponse { deleted }))
     }
@@ -344,18 +371,16 @@ impl EntityService for RrmService {
         &self,
         request: Request<UpsertEntityRequest>,
     ) -> Result<Response<UpsertEntityResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
+        let req = self.space_request(request).await?;
 
         let uid = Self::extract_uid_msg(req.uid, "uid")?;
         let _ = parse_attributes_json(&req.attributes_json)?;
 
-        let mut parents = Vec::with_capacity(req.parents.len());
-        for parent_msg in req.parents {
-            let parent_ref = Self::extract_uid_msg(Some(parent_msg), "parents")?;
-            parents.push(parent_ref);
-        }
+        let parents = req
+            .parents
+            .into_iter()
+            .map(|p| Self::extract_uid_msg(Some(p), "parents"))
+            .collect::<Result<Vec<_>, AppError>>()?;
 
         let entity = self
             .store
@@ -369,7 +394,7 @@ impl EntityService for RrmService {
             .await?;
 
         Ok(Response::new(UpsertEntityResponse {
-            entity: Some(Self::to_proto_entity(entity)),
+            entity: Some(entity.into()),
         }))
     }
 
@@ -377,10 +402,7 @@ impl EntityService for RrmService {
         &self,
         request: Request<GetEntityRequest>,
     ) -> Result<Response<GetEntityResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let uid = Self::extract_uid_msg(req.uid, "uid")?;
         let entity = self
             .store
@@ -388,7 +410,7 @@ impl EntityService for RrmService {
             .await?;
 
         Ok(Response::new(GetEntityResponse {
-            entity: Some(Self::to_proto_entity(entity)),
+            entity: Some(entity.into()),
         }))
     }
 
@@ -396,10 +418,7 @@ impl EntityService for RrmService {
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let filter = if req.entity_type.trim().is_empty() {
             None
         } else {
@@ -408,7 +427,7 @@ impl EntityService for RrmService {
         let entities = self.store.list_entities(&req.space_id, filter).await?;
 
         Ok(Response::new(ListEntitiesResponse {
-            entities: entities.into_iter().map(Self::to_proto_entity).collect(),
+            entities: entities.into_iter().map(Into::into).collect(),
         }))
     }
 
@@ -416,10 +435,7 @@ impl EntityService for RrmService {
         &self,
         request: Request<DeleteEntityRequest>,
     ) -> Result<Response<DeleteEntityResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
-
+        let req = self.space_request(request).await?;
         let uid = Self::extract_uid_msg(req.uid, "uid")?;
         let deleted = self
             .store
@@ -436,9 +452,7 @@ impl AuthorizationService for RrmService {
         &self,
         request: Request<AuthorizeRequest>,
     ) -> Result<Response<AuthorizeResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-        verify_space_access(&metadata, &self.store, &self.admin_token, &req.space_id).await?;
+        let req = self.space_request(request).await?;
 
         let principal = Self::extract_uid_msg(req.principal, "principal")?;
         let action = Self::extract_uid_msg(req.action, "action")?;
@@ -447,13 +461,11 @@ impl AuthorizationService for RrmService {
         let mut additional_entities = Vec::with_capacity(req.additional_entities.len());
         for item in req.additional_entities {
             let uid = Self::extract_uid_msg(item.uid, "additional_entities.uid")?;
-            let mut parents = Vec::with_capacity(item.parents.len());
-            for p in item.parents {
-                parents.push(Self::extract_uid_msg(
-                    Some(p),
-                    "additional_entities.parents",
-                )?);
-            }
+            let parents = item
+                .parents
+                .into_iter()
+                .map(|p| Self::extract_uid_msg(Some(p), "additional_entities.parents"))
+                .collect::<Result<Vec<_>, AppError>>()?;
             additional_entities.push(StoredEntity {
                 space_id: req.space_id.clone(),
                 entity_type: uid.entity_type,

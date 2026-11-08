@@ -1,14 +1,21 @@
-use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use prost_types::value::Kind;
+use serde_json::Value;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
-use crate::auth::{verify_space_access, extract_space_id_from_native_token, extract_bearer_or_raw, SPACE_TOKEN_HEADER, AUTHORIZATION_HEADER};
+use crate::auth::{
+    AUTHORIZATION_HEADER, SPACE_TOKEN_HEADER, extract_space_id_from_native_token, first_token,
+    metadata_str, verify_space_access,
+};
 use crate::authzen::{
     AuthzenAction, AuthzenBatchItemRequest, AuthzenBatchRequest, AuthzenResource, AuthzenSubject,
     evaluate_authzen, evaluate_authzen_batch,
 };
 use crate::authzen_pb::{
-    AccessEvaluationBatchRequest, AccessEvaluationBatchResponse, EvaluationItemResponse,
-    EvaluationRequest, EvaluationResponse,
+    AccessEvaluationBatchRequest, AccessEvaluationBatchResponse, Action, EvaluationItemResponse,
+    EvaluationRequest, EvaluationResponse, Resource, Subject,
     authorization_service_server::AuthorizationService,
 };
 use crate::store::Store;
@@ -16,48 +23,76 @@ use crate::store::Store;
 #[derive(Clone)]
 pub struct AuthzenGrpcService {
     store: Store,
-    admin_token: String,
+    admin_token: Arc<str>,
 }
 
 impl AuthzenGrpcService {
-    pub fn new(store: Store, admin_token: impl Into<String>) -> Self {
+    pub fn new(store: Store, admin_token: impl Into<Arc<str>>) -> Self {
         Self {
             store,
             admin_token: admin_token.into(),
         }
     }
 
+    /// Resolves the target space (from the request, or inferred from a native space
+    /// token) and verifies the caller may access it.
     async fn authenticate_space(
         &self,
-        metadata: &tonic::metadata::MetadataMap,
+        metadata: &MetadataMap,
         req_space_id: &str,
     ) -> Result<String, Status> {
-        let space_id = if !req_space_id.trim().is_empty() {
-            req_space_id.trim().to_string()
-        } else {
-            // Try to infer from token
-            let token = metadata
-                .get(SPACE_TOKEN_HEADER)
-                .or_else(|| metadata.get(AUTHORIZATION_HEADER))
-                .and_then(|v| v.to_str().ok())
-                .map(extract_bearer_or_raw);
-
-            if let Some(tok) = token {
-                if let Some(sid) = extract_space_id_from_native_token(tok) {
-                    sid.to_string()
-                } else {
-                    return Err(Status::invalid_argument("space_id is required in request or token"));
-                }
-            } else {
-                return Err(Status::unauthenticated("Missing authentication token"));
+        let space_id = match req_space_id.trim() {
+            "" => {
+                let token = first_token(
+                    |k| metadata_str(metadata, k),
+                    &[SPACE_TOKEN_HEADER, AUTHORIZATION_HEADER],
+                )
+                .ok_or_else(|| Status::unauthenticated("Missing authentication token"))?;
+                extract_space_id_from_native_token(token)
+                    .ok_or_else(|| {
+                        Status::invalid_argument("space_id is required in request or token")
+                    })?
+                    .to_string()
             }
+            explicit => explicit.to_string(),
         };
 
-        verify_space_access(metadata, &self.store, &self.admin_token, &space_id)
-            .await
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-
+        verify_space_access(metadata, &self.store, &self.admin_token, &space_id).await?;
         Ok(space_id)
+    }
+}
+
+/// Proto3 strings default to `""`; treat that as "not provided".
+fn non_empty(s: String) -> Option<String> {
+    (!s.is_empty()).then_some(s)
+}
+
+impl From<Subject> for AuthzenSubject {
+    fn from(s: Subject) -> Self {
+        Self {
+            subject_type: s.r#type,
+            id: non_empty(s.id),
+            properties: s.properties.as_ref().map(prost_struct_to_json),
+        }
+    }
+}
+
+impl From<Action> for AuthzenAction {
+    fn from(a: Action) -> Self {
+        Self {
+            name: non_empty(a.name),
+            properties: a.properties.as_ref().map(prost_struct_to_json),
+        }
+    }
+}
+
+impl From<Resource> for AuthzenResource {
+    fn from(r: Resource) -> Self {
+        Self {
+            resource_type: r.r#type,
+            id: non_empty(r.id),
+            properties: r.properties.as_ref().map(prost_struct_to_json),
+        }
     }
 }
 
@@ -67,38 +102,21 @@ impl AuthorizationService for AuthzenGrpcService {
         &self,
         request: Request<EvaluationRequest>,
     ) -> Result<Response<EvaluationResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-
+        let (metadata, _, req) = request.into_parts();
         let space_id = self.authenticate_space(&metadata, &req.space_id).await?;
 
-        let subject_proto = req
+        let subject: AuthzenSubject = req
             .subject
-            .ok_or_else(|| Status::invalid_argument("subject is required"))?;
-        let action_proto = req
+            .ok_or_else(|| Status::invalid_argument("subject is required"))?
+            .into();
+        let action: AuthzenAction = req
             .action
-            .ok_or_else(|| Status::invalid_argument("action is required"))?;
-        let resource_proto = req
+            .ok_or_else(|| Status::invalid_argument("action is required"))?
+            .into();
+        let resource: AuthzenResource = req
             .resource
-            .ok_or_else(|| Status::invalid_argument("resource is required"))?;
-
-        let subject = AuthzenSubject {
-            subject_type: subject_proto.r#type,
-            id: Some(subject_proto.id),
-            properties: subject_proto.properties.map(|p| prost_struct_to_json(&p)),
-        };
-
-        let action = AuthzenAction {
-            name: Some(action_proto.name),
-            properties: action_proto.properties.map(|p| prost_struct_to_json(&p)),
-        };
-
-        let resource = AuthzenResource {
-            resource_type: resource_proto.r#type,
-            id: Some(resource_proto.id),
-            properties: resource_proto.properties.map(|p| prost_struct_to_json(&p)),
-        };
-
+            .ok_or_else(|| Status::invalid_argument("resource is required"))?
+            .into();
         let context = req.context.as_ref().map(prost_struct_to_json);
 
         let outcome = evaluate_authzen(
@@ -109,14 +127,11 @@ impl AuthorizationService for AuthzenGrpcService {
             &resource,
             context.as_ref(),
         )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        let context_proto = outcome.context.map(|c| json_to_prost_struct(&c));
+        .await?;
 
         Ok(Response::new(EvaluationResponse {
             decision: outcome.decision,
-            context: context_proto,
+            context: outcome.context.as_ref().map(json_to_prost_struct),
         }))
     }
 
@@ -124,76 +139,42 @@ impl AuthorizationService for AuthzenGrpcService {
         &self,
         request: Request<AccessEvaluationBatchRequest>,
     ) -> Result<Response<AccessEvaluationBatchResponse>, Status> {
-        let metadata = request.metadata().clone();
-        let req = request.into_inner();
-
+        let (metadata, _, req) = request.into_parts();
         let space_id = self.authenticate_space(&metadata, &req.space_id).await?;
 
-        let default_subject = req.subject.map(|s| AuthzenSubject {
-            subject_type: s.r#type,
-            id: if s.id.is_empty() { None } else { Some(s.id) },
-            properties: s.properties.map(|p| prost_struct_to_json(&p)),
-        });
-
-        let default_action = req.action.map(|a| AuthzenAction {
-            name: if a.name.is_empty() { None } else { Some(a.name) },
-            properties: a.properties.map(|p| prost_struct_to_json(&p)),
-        });
-
-        let default_resource = req.resource.map(|r| AuthzenResource {
-            resource_type: r.r#type,
-            id: if r.id.is_empty() { None } else { Some(r.id) },
-            properties: r.properties.map(|p| prost_struct_to_json(&p)),
-        });
-
-        let default_context = req.context.as_ref().map(prost_struct_to_json);
-
-        let mut evaluations = Vec::with_capacity(req.evaluations.len());
-        for item in req.evaluations {
-            evaluations.push(AuthzenBatchItemRequest {
-                id: if item.id.is_empty() { None } else { Some(item.id) },
-                subject: item.subject.map(|s| AuthzenSubject {
-                    subject_type: s.r#type,
-                    id: if s.id.is_empty() { None } else { Some(s.id) },
-                    properties: s.properties.map(|p| prost_struct_to_json(&p)),
-                }),
-                action: item.action.map(|a| AuthzenAction {
-                    name: if a.name.is_empty() { None } else { Some(a.name) },
-                    properties: a.properties.map(|p| prost_struct_to_json(&p)),
-                }),
-                resource: item.resource.map(|r| AuthzenResource {
-                    resource_type: r.r#type,
-                    id: if r.id.is_empty() { None } else { Some(r.id) },
-                    properties: r.properties.map(|p| prost_struct_to_json(&p)),
-                }),
+        let evaluations = req
+            .evaluations
+            .into_iter()
+            .map(|item| AuthzenBatchItemRequest {
+                id: non_empty(item.id),
+                subject: item.subject.map(Into::into),
+                action: item.action.map(Into::into),
+                resource: item.resource.map(Into::into),
                 context: item.context.as_ref().map(prost_struct_to_json),
-            });
-        }
+            })
+            .collect();
 
         let batch_req = AuthzenBatchRequest {
             space_id: Some(space_id.clone()),
-            subject: default_subject,
-            action: default_action,
-            resource: default_resource,
-            context: default_context,
+            subject: req.subject.map(Into::into),
+            action: req.action.map(Into::into),
+            resource: req.resource.map(Into::into),
+            context: req.context.as_ref().map(prost_struct_to_json),
             evaluations,
         };
 
-        let batch_outcome = evaluate_authzen_batch(&self.store, &space_id, &batch_req)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let mut out_items = Vec::with_capacity(batch_outcome.evaluations.len());
-        for res in batch_outcome.evaluations {
-            out_items.push(EvaluationItemResponse {
-                id: res.id.unwrap_or_default(),
-                decision: res.decision,
-                context: res.context.map(|c| json_to_prost_struct(&c)),
-            });
-        }
+        let outcome = evaluate_authzen_batch(&self.store, &space_id, &batch_req).await?;
 
         Ok(Response::new(AccessEvaluationBatchResponse {
-            evaluations: out_items,
+            evaluations: outcome
+                .evaluations
+                .into_iter()
+                .map(|res| EvaluationItemResponse {
+                    id: res.id.unwrap_or_default(),
+                    decision: res.decision,
+                    context: res.context.as_ref().map(json_to_prost_struct),
+                })
+                .collect(),
         }))
     }
 }
@@ -202,64 +183,82 @@ impl AuthorizationService for AuthzenGrpcService {
 // Prost Struct <-> JSON Converters
 // ============================================================================
 
-pub fn prost_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for (k, v) in &s.fields {
-        map.insert(k.clone(), prost_value_to_json(v));
-    }
-    serde_json::Value::Object(map)
+pub fn prost_struct_to_json(s: &prost_types::Struct) -> Value {
+    Value::Object(
+        s.fields
+            .iter()
+            .map(|(k, v)| (k.clone(), prost_value_to_json(v)))
+            .collect(),
+    )
 }
 
-pub fn prost_value_to_json(v: &prost_types::Value) -> serde_json::Value {
+pub fn prost_value_to_json(v: &prost_types::Value) -> Value {
     match &v.kind {
-        Some(prost_types::value::Kind::NullValue(_)) => serde_json::Value::Null,
-        Some(prost_types::value::Kind::NumberValue(n)) => {
-            if let Some(num) = serde_json::Number::from_f64(*n) {
-                serde_json::Value::Number(num)
-            } else {
-                serde_json::Value::Null
-            }
+        Some(Kind::NullValue(_)) | None => Value::Null,
+        // Non-finite numbers (NaN / ±inf) are not representable in JSON.
+        Some(Kind::NumberValue(n)) => {
+            serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number)
         }
-        Some(prost_types::value::Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
-        Some(prost_types::value::Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
-        Some(prost_types::value::Kind::StructValue(s)) => prost_struct_to_json(s),
-        Some(prost_types::value::Kind::ListValue(l)) => {
-            serde_json::Value::Array(l.values.iter().map(prost_value_to_json).collect())
+        Some(Kind::StringValue(s)) => Value::String(s.clone()),
+        Some(Kind::BoolValue(b)) => Value::Bool(*b),
+        Some(Kind::StructValue(s)) => prost_struct_to_json(s),
+        Some(Kind::ListValue(l)) => {
+            Value::Array(l.values.iter().map(prost_value_to_json).collect())
         }
-        None => serde_json::Value::Null,
     }
 }
 
-pub fn json_to_prost_struct(val: &serde_json::Value) -> prost_types::Struct {
-    let mut fields = BTreeMap::new();
-    if let serde_json::Value::Object(map) = val {
-        for (k, v) in map {
-            fields.insert(k.clone(), json_to_prost_value(v));
-        }
-    }
+/// Converts a JSON value into a protobuf `Struct`. Non-object values yield an empty struct.
+pub fn json_to_prost_struct(val: &Value) -> prost_types::Struct {
+    let fields = match val {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), json_to_prost_value(v)))
+            .collect(),
+        _ => std::collections::BTreeMap::new(),
+    };
     prost_types::Struct { fields }
 }
 
-pub fn json_to_prost_value(val: &serde_json::Value) -> prost_types::Value {
+pub fn json_to_prost_value(val: &Value) -> prost_types::Value {
     let kind = match val {
-        serde_json::Value::Null => prost_types::value::Kind::NullValue(0),
-        serde_json::Value::Bool(b) => prost_types::value::Kind::BoolValue(*b),
-        serde_json::Value::Number(n) => {
-            prost_types::value::Kind::NumberValue(n.as_f64().unwrap_or(0.0))
-        }
-        serde_json::Value::String(s) => prost_types::value::Kind::StringValue(s.clone()),
-        serde_json::Value::Array(arr) => {
-            prost_types::value::Kind::ListValue(prost_types::ListValue {
-                values: arr.iter().map(json_to_prost_value).collect(),
-            })
-        }
-        serde_json::Value::Object(map) => {
-            let mut fields = BTreeMap::new();
-            for (k, v) in map {
-                fields.insert(k.clone(), json_to_prost_value(v));
-            }
-            prost_types::value::Kind::StructValue(prost_types::Struct { fields })
-        }
+        Value::Null => Kind::NullValue(0),
+        Value::Bool(b) => Kind::BoolValue(*b),
+        Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
+        Value::String(s) => Kind::StringValue(s.clone()),
+        Value::Array(arr) => Kind::ListValue(prost_types::ListValue {
+            values: arr.iter().map(json_to_prost_value).collect(),
+        }),
+        Value::Object(_) => Kind::StructValue(json_to_prost_struct(val)),
     };
     prost_types::Value { kind: Some(kind) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn json_and_prost_struct_round_trip() {
+        let original = json!({
+            "s": "x", "b": true, "n": 1.5, "null": null,
+            "list": [1.0, "two"], "nested": {"k": "v"}
+        });
+        assert_eq!(
+            prost_struct_to_json(&json_to_prost_struct(&original)),
+            original
+        );
+    }
+
+    #[test]
+    fn empty_proto_strings_become_none() {
+        let subject: AuthzenSubject = Subject {
+            r#type: "User".into(),
+            id: String::new(),
+            properties: None,
+        }
+        .into();
+        assert_eq!(subject.id, None);
+    }
 }

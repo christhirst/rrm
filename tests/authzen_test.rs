@@ -89,7 +89,7 @@ async fn setup_test_server(oauth_config: OAuthConfig) -> TestContext {
     let oauth_validator = OAuthValidator::new(oauth_config);
     let http_state = HttpAppState {
         store: store.clone(),
-        admin_token: TEST_ADMIN_TOKEN.to_string(),
+        admin_token: TEST_ADMIN_TOKEN.into(),
         oauth_validator,
         default_base_url: http_base_url.clone(),
     };
@@ -111,7 +111,9 @@ async fn setup_test_server(oauth_config: OAuthConfig) -> TestContext {
     tokio::spawn(async move {
         Server::builder()
             .add_service(AuthorizationServiceServer::new(authzen_grpc))
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
             .await
             .expect("grpc serve failed");
     });
@@ -136,7 +138,10 @@ async fn test_authzen_discovery_endpoint() {
 
     // 1. Global discovery
     let resp = client
-        .get(format!("{}/.well-known/authzen-configuration", ctx.http_base_url))
+        .get(format!(
+            "{}/.well-known/authzen-configuration",
+            ctx.http_base_url
+        ))
         .send()
         .await
         .expect("discovery request should succeed");
@@ -158,7 +163,10 @@ async fn test_authzen_discovery_endpoint() {
 
     // 2. Space-scoped discovery
     let space_resp = client
-        .get(format!("{}/spaces/{}/.well-known/authzen-configuration", ctx.http_base_url, ctx.space_id))
+        .get(format!(
+            "{}/spaces/{}/.well-known/authzen-configuration",
+            ctx.http_base_url, ctx.space_id
+        ))
         .send()
         .await
         .expect("space discovery request should succeed");
@@ -171,7 +179,10 @@ async fn test_authzen_discovery_endpoint() {
     );
     assert_eq!(
         space_body["access_evaluation_endpoint"],
-        format!("{}/spaces/{}/access/v1/evaluation", ctx.http_base_url, ctx.space_id)
+        format!(
+            "{}/spaces/{}/access/v1/evaluation",
+            ctx.http_base_url, ctx.space_id
+        )
     );
 }
 
@@ -273,7 +284,10 @@ async fn test_authzen_single_evaluation_permit_and_deny() {
 
     assert_eq!(admin_resp.status(), StatusCode::OK);
     let admin_body: serde_json::Value = admin_resp.json().await.expect("json body");
-    assert_eq!(admin_body["decision"], true, "Admin role should be permitted to delete");
+    assert_eq!(
+        admin_body["decision"], true,
+        "Admin role should be permitted to delete"
+    );
 
     let viewer_delete_payload = json!({
         "subject": {
@@ -302,7 +316,10 @@ async fn test_authzen_single_evaluation_permit_and_deny() {
 
     assert_eq!(viewer_resp.status(), StatusCode::OK);
     let viewer_body: serde_json::Value = viewer_resp.json().await.expect("json body");
-    assert_eq!(viewer_body["decision"], false, "Viewer role must be denied delete");
+    assert_eq!(
+        viewer_body["decision"], false,
+        "Viewer role must be denied delete"
+    );
 }
 
 #[tokio::test]
@@ -410,6 +427,15 @@ async fn test_authzen_authentication_unauthorized() {
 
 #[tokio::test]
 async fn test_authzen_oauth_jwt_authentication() {
+    #[derive(serde::Serialize)]
+    struct TestClaims {
+        sub: String,
+        iss: String,
+        aud: String,
+        exp: u64,
+        space_id: String,
+    }
+
     let jwt_secret = "my-super-secret-jwt-key-for-testing-12345";
     let oauth_config = OAuthConfig {
         enabled: true,
@@ -424,20 +450,11 @@ async fn test_authzen_oauth_jwt_authentication() {
     let client = reqwest::Client::new();
 
     // 1. Generate a valid OAuth JWT token pointing to ctx.space_id
-    #[derive(serde::Serialize)]
-    struct TestClaims {
-        sub: String,
-        iss: String,
-        aud: String,
-        exp: u64,
-        space_id: String,
-    }
-
     let claims = TestClaims {
         sub: "oauth-user-123".to_string(),
         iss: "https://idp.example.com".to_string(),
         aud: "rrm-service".to_string(),
-        exp: 2000000000,
+        exp: 2_000_000_000,
         space_id: ctx.space_id.clone(),
     };
 
@@ -472,7 +489,10 @@ async fn test_authzen_oauth_jwt_authentication() {
     println!("Status: {status}, Body: {text}");
     assert_eq!(status, StatusCode::OK);
     let body: serde_json::Value = serde_json::from_str(&text).expect("json body");
-    assert_eq!(body["decision"], true, "Valid OAuth JWT should authenticate successfully");
+    assert_eq!(
+        body["decision"], true,
+        "Valid OAuth JWT should authenticate successfully"
+    );
 
     // 3. Fallback: native space token STILL works even when OAuth is enabled!
     let fallback_resp = client
@@ -485,7 +505,10 @@ async fn test_authzen_oauth_jwt_authentication() {
 
     assert_eq!(fallback_resp.status(), StatusCode::OK);
     let fallback_body: serde_json::Value = fallback_resp.json().await.expect("json body");
-    assert_eq!(fallback_body["decision"], true, "Native token should still work seamlessly");
+    assert_eq!(
+        fallback_body["decision"], true,
+        "Native token should still work seamlessly"
+    );
 }
 
 #[tokio::test]

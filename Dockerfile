@@ -11,7 +11,7 @@ COPY proto ./proto
 COPY src ./src
 
 # Build release binary (uses protoc-bin-vendored so no external protoc needed)
-RUN cargo build --release --locked || cargo build --release
+RUN cargo build --release --locked
 
 # ============================================================================
 # Stage 2: Runtime (Distroless)
@@ -20,10 +20,9 @@ FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
 WORKDIR /app
 
-# Copy compiled binary, config, and proto with nonroot ownership
+# Copy compiled binary and config with nonroot ownership
 COPY --chown=nonroot:nonroot --from=builder /usr/src/rrm/target/release/rrm /app/rrm
 COPY --chown=nonroot:nonroot config /app/config
-COPY --chown=nonroot:nonroot proto /app/proto
 
 USER nonroot:nonroot
 

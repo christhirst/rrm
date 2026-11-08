@@ -22,6 +22,17 @@ pub struct EvaluationInput<'a> {
     pub additional_entities: &'a [StoredEntity],
 }
 
+/// A single authorization request against an already prepared space.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthorizationQuery<'a> {
+    pub principal: &'a EntityRef,
+    pub action: &'a EntityRef,
+    pub resource: &'a EntityRef,
+    pub context_json: &'a str,
+    /// Transient request-time entities (override stored entities with the same uid).
+    pub additional_entities: &'a [StoredEntity],
+}
+
 #[derive(Debug, Clone)]
 pub struct EvaluationOutcome {
     pub allowed: bool,
@@ -30,34 +41,34 @@ pub struct EvaluationOutcome {
     pub errors: Vec<String>,
 }
 
+impl EntityRef {
+    /// Parses this reference into a Cedar `EntityUid`.
+    pub fn to_uid(&self) -> Result<EntityUid, AppError> {
+        parse_entity_uid(&self.entity_type, &self.entity_id)
+    }
+}
+
 /// Parses an `EntityUid` from `entity_type` (e.g. `"User"`, `"App::Document"`)
 /// and `entity_id` (e.g. `"alice"`).
 pub fn parse_entity_uid(entity_type: &str, entity_id: &str) -> Result<EntityUid, AppError> {
     if entity_type.trim().is_empty() {
-        return Err(AppError::InvalidArgument(
-            "entity_type cannot be empty".to_string(),
-        ));
+        return Err(AppError::invalid("entity_type cannot be empty"));
     }
     let type_name = EntityTypeName::from_str(entity_type.trim()).map_err(|e| {
-        AppError::InvalidArgument(format!("Invalid Cedar entity type '{entity_type}': {e}"))
+        AppError::invalid(format!("Invalid Cedar entity type '{entity_type}': {e}"))
     })?;
-    let id = EntityId::from_str(entity_id).map_err(|e| {
-        AppError::InvalidArgument(format!("Invalid Cedar entity id '{entity_id}': {e}"))
-    })?;
+    let id = EntityId::from_str(entity_id)
+        .map_err(|e| AppError::invalid(format!("Invalid Cedar entity id '{entity_id}': {e}")))?;
     Ok(EntityUid::from_type_name_and_id(type_name, id))
 }
 
 /// Validates and parses a single Cedar policy with a given `policy_id`.
 pub fn validate_and_parse_policy(policy_id: &str, cedar_text: &str) -> Result<Policy, AppError> {
     if policy_id.trim().is_empty() {
-        return Err(AppError::InvalidArgument(
-            "policy_id cannot be empty".to_string(),
-        ));
+        return Err(AppError::invalid("policy_id cannot be empty"));
     }
     if cedar_text.trim().is_empty() {
-        return Err(AppError::InvalidArgument(
-            "cedar_text cannot be empty".to_string(),
-        ));
+        return Err(AppError::invalid("cedar_text cannot be empty"));
     }
     Policy::parse(Some(PolicyId::new(policy_id)), cedar_text)
         .map_err(|e| AppError::CedarPolicy(format!("Invalid Cedar policy '{policy_id}': {e}")))
@@ -93,58 +104,59 @@ pub fn build_policy_set(policies: &[StoredPolicy]) -> Result<PolicySet, AppError
 pub fn json_value_to_restricted_expr(value: &Value) -> Result<RestrictedExpression, AppError> {
     match value {
         Value::Bool(b) => Ok(RestrictedExpression::new_bool(*b)),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(RestrictedExpression::new_long(i))
-            } else {
-                Err(AppError::InvalidArgument(format!(
-                    "Cedar integer attributes require 64-bit signed integers; got '{n}' (use {{\"__decimal\": \"{n}\"}} for decimals)"
-                )))
-            }
-        }
+        Value::Number(n) => n.as_i64().map(RestrictedExpression::new_long).ok_or_else(|| {
+            AppError::invalid(format!(
+                "Cedar integer attributes require 64-bit signed integers; got '{n}' (use {{\"__decimal\": \"{n}\"}} for decimals)"
+            ))
+        }),
         Value::String(s) => Ok(RestrictedExpression::new_string(s.clone())),
-        Value::Array(items) => {
-            let mut exprs = Vec::with_capacity(items.len());
-            for item in items {
-                exprs.push(json_value_to_restricted_expr(item)?);
-            }
-            Ok(RestrictedExpression::new_set(exprs))
-        }
+        Value::Array(items) => items
+            .iter()
+            .map(json_value_to_restricted_expr)
+            .collect::<Result<Vec<_>, _>>()
+            .map(RestrictedExpression::new_set),
         Value::Object(map) => {
-            if map.len() == 1 {
-                if let Some(Value::Object(entity_obj)) = map.get("__entity")
-                    && let (Some(Value::String(t)), Some(Value::String(id))) =
-                        (entity_obj.get("type"), entity_obj.get("id"))
-                {
-                    let uid = parse_entity_uid(t, id)?;
-                    return Ok(RestrictedExpression::new_entity_uid(uid));
-                }
-                if let Some(Value::String(ip_str)) = map.get("__ip") {
-                    return Ok(RestrictedExpression::new_ip(ip_str));
-                }
-                if let Some(Value::String(dec_str)) = map.get("__decimal") {
-                    return Ok(RestrictedExpression::new_decimal(dec_str));
-                }
-                if let Some(Value::String(dt_str)) = map.get("__datetime") {
-                    return Ok(RestrictedExpression::new_datetime(dt_str));
-                }
+            if let Some(expr) = extension_value_to_restricted_expr(map)? {
+                return Ok(expr);
             }
-
-            let mut fields = Vec::with_capacity(map.len());
-            for (k, v) in map {
-                if v.is_null() {
-                    continue;
-                }
-                fields.push((k.clone(), json_value_to_restricted_expr(v)?));
-            }
-            RestrictedExpression::new_record(fields).map_err(|e| {
-                AppError::InvalidArgument(format!("Failed to construct Cedar record: {e}"))
-            })
+            let fields = map
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| Ok((k.clone(), json_value_to_restricted_expr(v)?)))
+                .collect::<Result<Vec<_>, AppError>>()?;
+            RestrictedExpression::new_record(fields)
+                .map_err(|e| AppError::invalid(format!("Failed to construct Cedar record: {e}")))
         }
-        Value::Null => Err(AppError::InvalidArgument(
-            "Cedar attributes cannot be top-level null".to_string(),
+        Value::Null => Err(AppError::invalid(
+            "Cedar attributes cannot be top-level null",
         )),
     }
+}
+
+/// Recognizes the single-key escape objects (`__entity`, `__ip`, `__decimal`,
+/// `__datetime`). Returns `Ok(None)` for ordinary records.
+fn extension_value_to_restricted_expr(
+    map: &serde_json::Map<String, Value>,
+) -> Result<Option<RestrictedExpression>, AppError> {
+    let mut entries = map.iter();
+    let (Some((key, value)), None) = (entries.next(), entries.next()) else {
+        return Ok(None);
+    };
+    let expr = match (key.as_str(), value) {
+        ("__entity", Value::Object(entity_obj)) => {
+            match (entity_obj.get("type"), entity_obj.get("id")) {
+                (Some(Value::String(t)), Some(Value::String(id))) => {
+                    RestrictedExpression::new_entity_uid(parse_entity_uid(t, id)?)
+                }
+                _ => return Ok(None),
+            }
+        }
+        ("__ip", Value::String(s)) => RestrictedExpression::new_ip(s),
+        ("__decimal", Value::String(s)) => RestrictedExpression::new_decimal(s),
+        ("__datetime", Value::String(s)) => RestrictedExpression::new_datetime(s),
+        _ => return Ok(None),
+    };
+    Ok(Some(expr))
 }
 
 /// Parses a JSON object string into a map of Cedar `RestrictedExpression`s.
@@ -156,24 +168,19 @@ pub fn parse_attributes_json(
         return Ok(HashMap::new());
     }
 
-    let parsed: Value = serde_json::from_str(trimmed).map_err(|e| {
-        AppError::InvalidArgument(format!("Invalid JSON in attributes/context: {e}"))
-    })?;
+    let parsed: Value = serde_json::from_str(trimmed)
+        .map_err(|e| AppError::invalid(format!("Invalid JSON in attributes/context: {e}")))?;
 
     let Value::Object(map) = parsed else {
-        return Err(AppError::InvalidArgument(
-            "Attributes and context JSON must be a JSON object".to_string(),
+        return Err(AppError::invalid(
+            "Attributes and context JSON must be a JSON object",
         ));
     };
 
-    let mut out = HashMap::with_capacity(map.len());
-    for (k, v) in map {
-        if v.is_null() {
-            continue;
-        }
-        out.insert(k, json_value_to_restricted_expr(&v)?);
-    }
-    Ok(out)
+    map.into_iter()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, v)| Ok((k, json_value_to_restricted_expr(&v)?)))
+        .collect()
 }
 
 /// Builds a Cedar `Context` from an optional JSON object string.
@@ -182,39 +189,42 @@ pub fn build_context(context_json: &str) -> Result<Context, AppError> {
     if attrs.is_empty() {
         return Ok(Context::empty());
     }
-    Context::from_pairs(attrs)
-        .map_err(|e| AppError::InvalidArgument(format!("Invalid Cedar context: {e}")))
+    Context::from_pairs(attrs).map_err(|e| AppError::invalid(format!("Invalid Cedar context: {e}")))
 }
 
-/// Combines SurrealDB `StoredUser` records, `StoredEntity` records, and transient
-/// request-time entities into a Cedar `Entities` graph.
-pub fn build_entities(
-    users: &[StoredUser],
-    stored_entities: &[StoredEntity],
-    additional_entities: &[StoredEntity],
-) -> Result<Entities, AppError> {
-    let mut entity_map: HashMap<EntityUid, Entity> = HashMap::new();
-    let mut referenced_parents: HashSet<EntityUid> = HashSet::new();
+/// Accumulates Cedar entities keyed by uid and remembers every referenced parent
+/// so that missing parents can be materialized as attribute-less entities.
+#[derive(Debug, Clone, Default)]
+struct EntityGraph {
+    entities: HashMap<EntityUid, Entity>,
+    referenced_parents: HashSet<EntityUid>,
+}
 
-    // 1. Add generic stored entities first
-    for item in stored_entities.iter().chain(additional_entities.iter()) {
+impl EntityGraph {
+    fn insert(&mut self, entity: Entity) {
+        self.entities.insert(entity.uid(), entity);
+    }
+
+    fn add_stored(&mut self, item: &StoredEntity) -> Result<(), AppError> {
         let uid = parse_entity_uid(&item.entity_type, &item.entity_id)?;
         let attrs = parse_attributes_json(&item.attributes_json)?;
-        let mut parents = HashSet::with_capacity(item.parents.len());
-        for parent_ref in &item.parents {
-            let parent_uid = parse_entity_uid(&parent_ref.entity_type, &parent_ref.entity_id)?;
-            referenced_parents.insert(parent_uid.clone());
-            parents.insert(parent_uid);
-        }
+        let parents = item
+            .parents
+            .iter()
+            .map(EntityRef::to_uid)
+            .collect::<Result<HashSet<_>, _>>()?;
+        self.referenced_parents.extend(parents.iter().cloned());
 
         let entity = Entity::new(uid.clone(), attrs, parents).map_err(|e| {
             AppError::CedarPolicy(format!("Failed to construct entity '{uid}': {e}"))
         })?;
-        entity_map.insert(uid, entity);
+        self.insert(entity);
+        Ok(())
     }
 
-    // 2. Project StoredUser records into `User::"<user_id>"` entities
-    for user in users {
+    /// Projects a `StoredUser` into a `User::"<user_id>"` entity whose parents are
+    /// its `Role::"…"` and `Group::"…"` memberships.
+    fn add_user(&mut self, user: &StoredUser) -> Result<(), AppError> {
         let uid = parse_entity_uid("User", &user.user_id)?;
         let mut attrs = parse_attributes_json(&user.attributes_json)?;
         if !user.email.is_empty() {
@@ -222,96 +232,148 @@ pub fn build_entities(
                 .entry("email".to_string())
                 .or_insert_with(|| RestrictedExpression::new_string(user.email.clone()));
         }
-        attrs.entry("roles".to_string()).or_insert_with(|| {
-            RestrictedExpression::new_set(
-                user.roles
-                    .iter()
-                    .cloned()
-                    .map(RestrictedExpression::new_string),
-            )
-        });
-        attrs.entry("groups".to_string()).or_insert_with(|| {
-            RestrictedExpression::new_set(
-                user.groups
-                    .iter()
-                    .cloned()
-                    .map(RestrictedExpression::new_string),
-            )
-        });
+        for (name, values) in [("roles", &user.roles), ("groups", &user.groups)] {
+            attrs.entry(name.to_string()).or_insert_with(|| {
+                RestrictedExpression::new_set(
+                    values.iter().cloned().map(RestrictedExpression::new_string),
+                )
+            });
+        }
 
-        let mut parents = HashSet::new();
-        for role in &user.roles {
-            if !role.trim().is_empty() {
-                let role_uid = parse_entity_uid("Role", role)?;
-                referenced_parents.insert(role_uid.clone());
-                parents.insert(role_uid);
-            }
-        }
-        for group in &user.groups {
-            if !group.trim().is_empty() {
-                let group_uid = parse_entity_uid("Group", group)?;
-                referenced_parents.insert(group_uid.clone());
-                parents.insert(group_uid);
-            }
-        }
+        let memberships = [("Role", &user.roles), ("Group", &user.groups)];
+        let parents = memberships
+            .iter()
+            .flat_map(|(ty, ids)| ids.iter().map(move |id| (*ty, id)))
+            .filter(|(_, id)| !id.trim().is_empty())
+            .map(|(ty, id)| parse_entity_uid(ty, id))
+            .collect::<Result<HashSet<_>, _>>()?;
+        self.referenced_parents.extend(parents.iter().cloned());
 
         let entity = Entity::new(uid.clone(), attrs, parents).map_err(|e| {
             AppError::CedarPolicy(format!("Failed to construct user entity '{uid}': {e}"))
         })?;
-        entity_map.insert(uid, entity);
+        self.insert(entity);
+        Ok(())
     }
 
-    // 3. Ensure any parent EntityUid referenced by a User or Entity exists in the graph
-    for parent_uid in referenced_parents {
-        entity_map
-            .entry(parent_uid.clone())
-            .or_insert_with(|| Entity::with_uid(parent_uid));
+    fn into_entities(mut self) -> Result<Entities, AppError> {
+        // Ensure any parent EntityUid referenced by a User or Entity exists in the graph
+        for parent_uid in self.referenced_parents {
+            self.entities
+                .entry(parent_uid.clone())
+                .or_insert_with(|| Entity::with_uid(parent_uid));
+        }
+        Entities::from_entities(self.entities.into_values(), None)
+            .map_err(|e| AppError::CedarPolicy(format!("Failed to build Cedar entity graph: {e}")))
+    }
+}
+
+/// Combines `SurrealDB` `StoredUser` records, `StoredEntity` records, and transient
+/// request-time entities into a Cedar `Entities` graph.
+///
+/// Precedence on uid conflicts: users > additional entities > stored entities.
+pub fn build_entities(
+    users: &[StoredUser],
+    stored_entities: &[StoredEntity],
+    additional_entities: &[StoredEntity],
+) -> Result<Entities, AppError> {
+    let mut graph = EntityGraph::default();
+    for item in stored_entities.iter().chain(additional_entities) {
+        graph.add_stored(item)?;
+    }
+    for user in users {
+        graph.add_user(user)?;
+    }
+    graph.into_entities()
+}
+
+/// A space's policies and persisted entities, parsed once and reusable across
+/// many authorization requests (e.g. `AuthZEN` batch evaluations).
+#[derive(Debug, Clone)]
+pub struct PreparedSpace {
+    policy_set: PolicySet,
+    stored: EntityGraph,
+    users: EntityGraph,
+}
+
+impl PreparedSpace {
+    pub fn new(
+        policies: &[StoredPolicy],
+        users: &[StoredUser],
+        stored_entities: &[StoredEntity],
+    ) -> Result<Self, AppError> {
+        let mut stored = EntityGraph::default();
+        for item in stored_entities {
+            stored.add_stored(item)?;
+        }
+        let mut user_graph = EntityGraph::default();
+        for user in users {
+            user_graph.add_user(user)?;
+        }
+        Ok(Self {
+            policy_set: build_policy_set(policies)?,
+            stored,
+            users: user_graph,
+        })
     }
 
-    Entities::from_entities(entity_map.into_values(), None)
-        .map_err(|e| AppError::CedarPolicy(format!("Failed to build Cedar entity graph: {e}")))
+    /// Evaluates a single request against this space.
+    pub fn evaluate(&self, query: &AuthorizationQuery<'_>) -> Result<EvaluationOutcome, AppError> {
+        let request = Request::new(
+            query.principal.to_uid()?,
+            query.action.to_uid()?,
+            query.resource.to_uid()?,
+            build_context(query.context_json)?,
+            None,
+        )
+        .map_err(|e| AppError::invalid(format!("Failed to construct Cedar request: {e}")))?;
+
+        // Same precedence as `build_entities`: users > additional > stored.
+        let mut graph = self.stored.clone();
+        for item in query.additional_entities {
+            graph.add_stored(item)?;
+        }
+        graph.entities.extend(
+            self.users
+                .entities
+                .iter()
+                .map(|(uid, e)| (uid.clone(), e.clone())),
+        );
+        graph
+            .referenced_parents
+            .extend(self.users.referenced_parents.iter().cloned());
+        let entities = graph.into_entities()?;
+
+        let response = Authorizer::new().is_authorized(&request, &self.policy_set, &entities);
+        let decision = response.decision();
+        Ok(EvaluationOutcome {
+            allowed: decision == Decision::Allow,
+            decision,
+            determining_policies: response
+                .diagnostics()
+                .reason()
+                .map(ToString::to_string)
+                .collect(),
+            errors: response
+                .diagnostics()
+                .errors()
+                .map(ToString::to_string)
+                .collect(),
+        })
+    }
 }
 
 /// Evaluates an authorization request against the space's policies and entities.
 pub fn evaluate_authorization(input: &EvaluationInput<'_>) -> Result<EvaluationOutcome, AppError> {
-    let principal = parse_entity_uid(&input.principal.entity_type, &input.principal.entity_id)?;
-    let action = parse_entity_uid(&input.action.entity_type, &input.action.entity_id)?;
-    let resource = parse_entity_uid(&input.resource.entity_type, &input.resource.entity_id)?;
-    let context = build_context(input.context_json)?;
-
-    let request = Request::new(principal, action, resource, context, None).map_err(|e| {
-        AppError::InvalidArgument(format!("Failed to construct Cedar request: {e}"))
-    })?;
-
-    let policy_set = build_policy_set(input.policies)?;
-    let entities = build_entities(
-        input.users,
-        input.stored_entities,
-        input.additional_entities,
-    )?;
-
-    let authorizer = Authorizer::new();
-    let response = authorizer.is_authorized(&request, &policy_set, &entities);
-
-    let decision = response.decision();
-    let allowed = decision == Decision::Allow;
-    let determining_policies = response
-        .diagnostics()
-        .reason()
-        .map(ToString::to_string)
-        .collect();
-    let errors = response
-        .diagnostics()
-        .errors()
-        .map(ToString::to_string)
-        .collect();
-
-    Ok(EvaluationOutcome {
-        allowed,
-        decision,
-        determining_policies,
-        errors,
-    })
+    PreparedSpace::new(input.policies, input.users, input.stored_entities)?.evaluate(
+        &AuthorizationQuery {
+            principal: input.principal,
+            action: input.action,
+            resource: input.resource,
+            context_json: input.context_json,
+            additional_entities: input.additional_entities,
+        },
+    )
 }
 
 #[cfg(test)]

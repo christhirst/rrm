@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tonic::transport::Server;
 use tracing::info;
@@ -16,6 +17,8 @@ use rrm::pb::{
     entity_service_server::EntityServiceServer, policy_service_server::PolicyServiceServer,
 };
 use rrm::store::Store;
+
+const DEFAULT_INSECURE_ADMIN_TOKEN: &str = "admin-secret-token";
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -38,8 +41,8 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        () = ctrl_c => {},
+        () = terminate => {},
     }
     info!("Shutdown signal received, stopping servers");
 }
@@ -53,6 +56,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = AppConfig::load()?;
+
+    if cfg.auth.admin_token.trim().is_empty()
+        || cfg.auth.admin_token == DEFAULT_INSECURE_ADMIN_TOKEN
+    {
+        tracing::error!(
+            "Insecure default admin token detected. You must set a custom auth.admin_token (e.g. via RRM_AUTH__ADMIN_TOKEN environment variable)."
+        );
+        return Err(
+            "Refusing to start with insecure default or empty admin token. Please configure auth.admin_token."
+                .into(),
+        );
+    }
+
     let grpc_addr: SocketAddr = cfg.server.listen_addr.parse()?;
     let http_addr: SocketAddr = cfg.server.http_listen_addr.parse()?;
 
@@ -64,8 +80,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let store = Store::connect(&cfg.surrealdb).await?;
 
-    let service = RrmService::new(store.clone(), cfg.auth.admin_token.clone());
-    let authzen_service = AuthzenGrpcService::new(store.clone(), cfg.auth.admin_token.clone());
+    let admin_token: Arc<str> = cfg.auth.admin_token.into();
+    let service = RrmService::new(store.clone(), admin_token.clone());
+    let authzen_service = AuthzenGrpcService::new(store.clone(), admin_token.clone());
 
     info!(%grpc_addr, "Starting RRM Cedar Policy & SurrealDB gRPC Server");
     info!(%http_addr, "Starting RRM AuthZEN HTTP REST Server");
@@ -81,29 +98,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let oauth_validator = OAuthValidator::new(cfg.auth.oauth);
     let http_app_state = HttpAppState {
         store,
-        admin_token: cfg.auth.admin_token,
+        admin_token,
         oauth_validator,
         default_base_url: format!("http://{http_addr}"),
     };
     let http_router = create_http_router(http_app_state);
 
     let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
-    let http_server = axum::serve(http_listener, http_router)
-        .with_graceful_shutdown(shutdown_signal());
+    let http_server =
+        axum::serve(http_listener, http_router).with_graceful_shutdown(shutdown_signal());
 
     tokio::select! {
         res = grpc_server => {
             if let Err(e) = res {
-                tracing::error!("gRPC server error: {e}");
+                tracing::error!(error = %e, "gRPC server error");
             }
         }
         res = http_server => {
             if let Err(e) = res {
-                tracing::error!("HTTP server error: {e}");
+                tracing::error!(error = %e, "HTTP server error");
             }
         }
     }
 
     Ok(())
 }
-
