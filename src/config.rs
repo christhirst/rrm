@@ -133,6 +133,6 @@ mod tests {
         assert_eq!(cfg.surrealdb.endpoint, "memory");
         assert_eq!(cfg.surrealdb.namespace, "rrm");
         assert_eq!(cfg.surrealdb.database, "authz");
-        assert!(!cfg.auth.admin_token.is_empty());
+        assert_ne!(cfg.auth.admin_token, "");
     }
 }

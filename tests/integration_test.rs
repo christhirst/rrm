@@ -111,7 +111,7 @@ async fn full_multi_tenant_cedar_and_surrealdb_grpc_workflow() {
         .expect("admin should create orders-app space")
         .into_inner();
     let orders_token = orders_space_resp.api_token;
-    assert!(!orders_token.is_empty());
+    assert_ne!(orders_token, "");
 
     let hr_space_resp = admin_client
         .create_space(with_admin(CreateSpaceRequest {
